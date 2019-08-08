@@ -1,0 +1,437 @@
+Description: Basic Architecture for Web Server Hosting.
+
+Parameters:
+  EnvironmentName:
+    Description: Environment Name.
+    Type: String
+    Default: testing
+  VpcCIDR:
+    Description: CIDR Range for the new VPC.
+    Type: String
+    Default: 10.12.0.0/16
+  DatabaseInstanceType:
+    Description: DB Instance Type.
+    Type: String
+    AllowedValues:
+      - db.t2.small
+      - db.t2.medium
+      - db.t2.large
+    Default: db.t2.small
+  dbPassword:
+    Type: String
+    NoEcho: true
+    Description: Password for DataBase RDS Instance.
+
+  WebserverAmiID:
+    Type: String
+    Description: AMI ID of Web Server (Default- Ubuntu Server 18.04 LTS (HVM), SSD Volume Type, us-west-1)
+    Default: ami-05c1fa8df71875112
+  WebserverInstanceType:
+    Type: String
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+    Default: t3.small
+    Description: WebServer (EC2) Instance Type.
+  WebServerKey:
+    Type: String
+    Default: phcm-ohio
+    Description: Key to use while creating web server EC2 instances in order to access the server.
+
+Resources:
+  # Step 1: Create VPC.
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  # Step 2: Create Internet Gateway.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Step 3: Attach Internet Gateway to VPC.
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # Step 4: Create Public Subnet 1.
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Select [ 0, !Cidr [ !Ref VpcCIDR, 256, 8 ]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ1)
+
+  # Step 5: Create Public Subnet 2.
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Select [ 1, !Cidr [ !Ref VpcCIDR, 256, 8 ]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ2)
+
+
+  # Step 6: Create Private Subnet 1.
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Select [ 5, !Cidr [ !Ref VpcCIDR, 256, 8 ]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ1)
+
+  # Step 7: Create Private Subnet 2.
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Select [ 6, !Cidr [ !Ref VpcCIDR, 256, 8 ]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ2)
+
+  # Step 8: Create EIP for NAT Gateway.
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  # Step 9: Create NAT Gateway in Public Subnet 1.
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  # Step 10: Create Public Route Table.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes
+
+  # Step 11: Route for Public Route Table.
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Step 12: Associate Public Route Table to Public Subnet 1.
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  # Step 13: Associate Public Route Table to Public Subnet 2.
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  # Step 14: Create Private Route Table.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes
+
+  # Step 15: Create Route to Internet for Private Route Table.
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  # Step 16: Associate Private Route Table to Private Subnet 1.
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  # Step 17: Associate Private Route Table to Private Subnet 2.
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  # Step 18: Create ALB Security Group
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group to allow web traffic served by web servers.
+      GroupName: ALB-SG
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow Web Traffic to Internet
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          Description: Allow Web Traffic to Internet
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow Web Traffic from Internet
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          Description: Allow Web Traffic from Internet
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}_ALB_SG
+        - Key: Environment
+          Value: !Ref EnvironmentName
+      VpcId: !Ref VPC
+
+
+  # Step 19: Create Web Server Security Group
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group to allow web traffic served by web servers.
+      GroupName: WebServer-SG
+      SecurityGroupEgress:
+        - DestinationSecurityGroupId: !GetAtt [AlbSecurityGroup,GroupId]
+          Description: Allow Web Traffic to Internet
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - DestinationSecurityGroupId: !GetAtt [AlbSecurityGroup,GroupId]
+          Description: Allow Web Traffic to Internet
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !GetAtt [AlbSecurityGroup,GroupId]
+          Description: Allow Web Traffic from Internet
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - SourceSecurityGroupId: !GetAtt [AlbSecurityGroup,GroupId]
+          Description: Allow Web Traffic from Internet
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}_WebServer_SG
+        - Key: Environment
+          Value: !Ref EnvironmentName
+      VpcId: !Ref VPC
+
+  # Step 20: Create DB Server Security Group
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group to allow web traffic served by web servers.
+      GroupName: DB-SG
+      SecurityGroupEgress:
+        - DestinationSecurityGroupId: !GetAtt [WebSecurityGroup,GroupId]
+          Description: Allow MySQL Traffic to WebServer
+          FromPort: 3306
+          IpProtocol: tcp
+          ToPort: 3306
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !GetAtt [WebSecurityGroup,GroupId]
+          Description: Allow MySQL Traffic from Web Server
+          FromPort: 3306
+          IpProtocol: tcp
+          ToPort: 3306
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}_DB_SG
+      VpcId: !Ref VPC
+
+  # Step 21: Allow MySQL traffic from DB to Web Server
+  MySQLfromDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow MySQL Traffic from DB Server
+      FromPort: 3306
+      GroupId: !GetAtt [WebSecurityGroup,GroupId]
+      IpProtocol: tcp
+      SourceSecurityGroupId: !GetAtt [DbSecurityGroup,GroupId]
+      ToPort: 3306
+
+  # Step 22: Allow MySQL traffic to DB from Web Server
+  MySQLtoDB:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow MySQL Traffic to DB Server
+      FromPort: 3306
+      GroupId: !GetAtt [WebSecurityGroup,GroupId]
+      IpProtocol: tcp
+      DestinationSecurityGroupId: !GetAtt [DbSecurityGroup,GroupId]
+      ToPort: 3306
+
+  # Step 23: Create the RDS instance.
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub ${EnvironmentName} DB Subnet Group
+      DBSubnetGroupName: !Sub ${EnvironmentName}-DB-SG
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}_DB_SubnetGroup
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  DatabaseRDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      AllowMajorVersionUpgrade: true
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 4
+      CopyTagsToSnapshot: true
+      DBInstanceClass: !Ref DatabaseInstanceType
+      DBInstanceIdentifier: !Sub ${EnvironmentName}-DB-Server
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      DeleteAutomatedBackups: true
+      Engine: MySQL
+      EngineVersion: 5.7.22
+      LicenseModel: general-public-license
+      MasterUsername: admin
+      MasterUserPassword: !Ref dbPassword
+      MultiAZ: false
+      Port: 3306
+      PreferredBackupWindow: 07:00-07:30
+      PreferredMaintenanceWindow: sat:08:00-sat:10:00
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      Tags:
+        - Key: Name
+          Value:  !Sub ${EnvironmentName} DB Instance
+        - Key: Environment
+          Value: !Ref EnvironmentName
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+
+  # Step 24: Create the Web Server.
+  WebServerEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WebserverAmiID
+      InstanceType: !Ref WebserverInstanceType
+      KeyName: !Ref WebServerKey
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      SubnetId: !Ref PrivateSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} WebServer Instance
+        - Key: Environment
+          Value: !Ref EnvironmentName
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            apt-get update
+            apt-get -y install nginx
+            hostnamectl set-hostname ${hostname}
+            service nginx start
+          - hostname: !Ref EnvironmentName
+
+  # Step 25: Create Target Group for ALB
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: WebServerEC2
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 2
+      Name: !Sub ${EnvironmentName}-TG
+      Port: 80
+      Protocol: HTTP
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}_TG
+        - Key: Environment
+          Value: !Ref EnvironmentName
+      Targets:
+        - Id: !Ref WebServerEC2
+      TargetType: instance
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VPC
+
+  # Step 26: Create App Load Balancer for Web Traffic
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Name: !Sub ${EnvironmentName}-ALB
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}_ALB
+        - Key: Environment
+          Value: !Ref EnvironmentName
+      Type: application
+
+  # Step 27: Redirect Traffic to Web Server Target Group.
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          Order: 1
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
